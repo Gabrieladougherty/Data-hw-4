@@ -1,0 +1,162 @@
+from flask import Flask, request, jsonify
+import joblib
+import pandas as pd
+
+app = Flask(__name__)
+
+# Load your trained pipeline (xgb_manual or hw2_pipeline) from HW3
+model = joblib.load("model/model.pkl")
+
+# HW2/HW3 feature set
+FEATURE_COLS = [
+    "delivery_days",
+    "delivery_vs_estimated",
+    "order_purchase_dow",
+    "total_price",
+    "total_freight",
+    "n_items",
+    "n_sellers",
+    "avg_price",
+    "payment_value",
+    "payment_installments",
+    "product_category",
+    "seller_state",
+    "payment_type",
+]
+
+NUMERIC_COLS = [
+    "delivery_days",
+    "delivery_vs_estimated",
+    "order_purchase_dow",
+    "total_price",
+    "total_freight",
+    "n_items",
+    "n_sellers",
+    "avg_price",
+    "payment_value",
+    "payment_installments",
+]
+
+CATEGORICAL_COLS = ["product_category", "seller_state", "payment_type"]
+
+def validate_record(record: dict) -> dict:
+    """Return a dict of field -> error message (empty dict means valid)."""
+    errors = {}
+
+    # check missing fields
+    for f in FEATURE_COLS:
+        if f not in record:
+            errors[f] = "missing"
+
+    # numeric checks
+    for f in NUMERIC_COLS:
+        if f in record and not isinstance(record[f], (int, float)):
+            errors[f] = "must be a number"
+
+    # simple non-negative constraints for some fields
+    nonneg = [
+        "delivery_days",
+        "total_price",
+        "total_freight",
+        "n_items",
+        "n_sellers",
+        "payment_value",
+        "payment_installments",
+    ]
+    for f in nonneg:
+        if f in record and isinstance(record[f], (int, float)) and record[f] < 0:
+            errors[f] = "must be non-negative"
+
+    # categorical checks
+    for f in CATEGORICAL_COLS:
+        if f in record and not isinstance(record[f], str):
+            errors[f] = "must be a string"
+
+    return errors
+
+def build_features(records):
+    """Turn list[dict] into DataFrame with correct schema and column order."""
+    df = pd.DataFrame(records)
+
+    # ensure all expected columns exist
+    for col in FEATURE_COLS:
+        if col not in df.columns:
+            df[col] = None
+
+    # order columns
+    df = df[FEATURE_COLS]
+    return df
+
+@app.get("/health")
+def health():
+    return jsonify({"status": "healthy", "model": "loaded"})
+
+@app.post("/predict")
+def predict():
+    payload = request.get_json()
+    if not isinstance(payload, dict):
+        return jsonify({
+            "error": "Invalid input",
+            "details": "JSON object expected"
+        }), 400
+
+    errors = validate_record(payload)
+    if errors:
+        return jsonify({
+            "error": "Invalid input",
+            "details": errors
+        }), 400
+
+    X = build_features([payload])
+    proba = float(model.predict_proba(X)[0, 1])
+    pred = int(proba >= 0.5)
+    label = "positive" if pred == 1 else "negative"
+
+    return jsonify({
+        "prediction": pred,
+        "probability": proba,
+        "label": label
+    })
+
+@app.post("/predict/batch")
+def predict_batch():
+    payload = request.get_json()
+    if not isinstance(payload, list) or len(payload) == 0:
+        return jsonify({
+            "error": "Invalid input",
+            "details": "Non-empty list of records required"
+        }), 400
+
+    if len(payload) > 100:
+        return jsonify({
+            "error": "Invalid input",
+            "details": "Max 100 records per request"
+        }), 400
+
+    # validate each record
+    for i, rec in enumerate(payload):
+        errors = validate_record(rec)
+        if errors:
+            return jsonify({
+                "error": "Invalid input",
+                "details": {f"record_{i}": errors}
+            }), 400
+
+    X = build_features(payload)
+    probas = model.predict_proba(X)[:, 1]
+    preds = (probas >= 0.5).astype(int)
+
+    results = []
+    for p, pr in zip(preds, probas):
+        results.append({
+            "prediction": int(p),
+            "probability": float(pr),
+            "label": "positive" if p == 1 else "negative"
+        })
+
+    return jsonify(results)
+
+if __name__ == "__main__":
+    # For local dev only; Docker will use gunicorn
+    app.run(host="0.0.0.0", port=5000, debug=True)
+    
