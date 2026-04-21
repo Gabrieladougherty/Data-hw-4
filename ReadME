@@ -1,0 +1,268 @@
+# DATA 6545 – HW4 MLOps API
+
+This repository contains my solution for **Homework 4 (MLOps)**. It packages the **Olist customer satisfaction model** from HW3 into a production-style **Flask + gunicorn API**, containerized with **Docker**, and tested from **GitHub Codespaces**.
+
+---
+
+## 1. Project Structure
+.
+├── app.py              # Flask API (health, predict, predict/batch)
+├── model.pkl           # Fitted HW3 pipeline (RandomForest + preprocessing)
+├── test_api.py         # Script with 5 functional API tests
+├── train_model.py      # HW3-style training script to produce model.pkl
+├── Dockerfile          # Container image definition (python:3.10-slim + gunicorn)
+├── requirements.txt    # Python dependencies
+├── data/               # (Optional) Olist CSVs if checked into repo
+└── Archive/            # Original Olist CSVs as provided for HW3
+
+---
+
+## 2. Model Overview
+
+- **Problem**: Binary classification of **review sentiment** (positive vs. negative) based on order and delivery features from the **Olist** dataset.
+- **Model**: `RandomForestClassifier` inside a `sklearn.Pipeline` with:
+
+  - **Numerical features** (scaled):  
+    - `delivery_days`  
+    - `delivery_vs_estimated`  
+    - `order_purchase_dow`  
+    - `total_price`  
+    - `total_freight`  
+    - `n_items`  
+    - `n_sellers`  
+    - `avg_price`  
+    - `payment_value`  
+    - `payment_installments`
+
+  - **Categorical features** (one-hot encoded):  
+    - `product_category`  
+    - `seller_state`  
+    - `payment_type`
+
+- **Target**: Binary label derived from review scores (1–3 = 0, 4–5 = 1), as in HW2/HW3.
+- The fitted pipeline is serialized to **`model.pkl`** and loaded by `app.py`.
+
+---
+
+## 3. API Endpoints
+
+### 3.1 Base URLs
+
+- **Internal (for tests)**:  
+  `http://127.0.0.1:5000` (or `http://127.0.0.1:5001` if mapped)
+- **External (Codespaces forwarded URL – example)**:  
+  `https://special-space-cod-q77v556xq45xcrxv-5001.app.github.dev/`
+
+> Update the external URL above with your actual Codespaces or Render URL for submission.
+---
+
+### 3.2 `GET /health`
+
+Returns a simple health check and confirms the model is loaded.
+
+**Request** 
+
+GET /health
+{
+  "status": "healthy",
+  "model": "loaded"
+}
+
+### 3.3 `POST /predict` (Single Record)
+
+Runs the model on a **single record** and returns a prediction.
+
+**Request**
+POST /predict
+Content-Type: application/json
+
+{
+  "delivery_days": 12,
+  "delivery_vs_estimated": 3,
+  "order_purchase_dow": 2,
+  "total_price": 149.99,
+  "total_freight": 25.50,
+  "n_items": 1,
+  "n_sellers": 1,
+  "avg_price": 149.99,
+  "payment_value": 175.49,
+  "payment_installments": 3,
+  "product_category": "electronics",
+  "seller_state": "SP",
+  "payment_type": "credit_card"
+}
+**Response**
+{
+  "prediction": 1,
+  "probability": 0.87,
+  "label": "positive"
+}
+
+**Response (400 – invalid input)**
+{
+  "error": "Invalid input",
+  "details": {
+    "total_price": "missing"
+  }
+}
+
+
+
+### 3.4 `POST /predict/batch` (Multiple Records)
+
+Runs the model on a **list of records** (up to 100) and returns predictions for each.
+
+**Request**
+POST /predict/batch
+Content-Type: application/json
+
+[
+  {
+    "delivery_days": 12,
+    "delivery_vs_estimated": 3,
+    "order_purchase_dow": 2,
+    "total_price": 149.99,
+    "total_freight": 25.50,
+    "n_items": 1,
+    "n_sellers": 1,
+    "avg_price": 149.99,
+    "payment_value": 175.49,
+    "payment_installments": 3,
+    "product_category": "electronics",
+    "seller_state": "SP",
+    "payment_type": "credit_card"
+  },
+  { "... second record ..." }
+]
+**Response**
+
+{
+  "results": [
+    {
+      "prediction": 1,
+      "probability": 0.87,
+      "label": "positive"
+    },
+    {
+      "prediction": 0,
+      "probability": 0.23,
+      "label": "negative"
+    }
+  ]
+}
+
+**Response(400-validationerror in batch)**
+{
+  "error": "Invalid input",
+  "details": [
+    {
+      "total_price": "missing"
+    },
+    {
+      "total_price": "must be a number"
+    }
+  ]
+}
+---
+
+## 4. Input Schema & Validation
+
+### 4.1 Required Fields
+
+| Field                   | Type    | Description                                           | Example        |
+|-------------------------|---------|-------------------------------------------------------|----------------|
+| `delivery_days`         | number  | Days from purchase to delivery                       | `12`           |
+| `delivery_vs_estimated` | number  | Delivery minus estimated delivery (days)             | `3`            |
+| `order_purchase_dow`    | number  | Day of week of purchase (0–6)                        | `2`            |
+| `total_price`           | number  | Sum of item prices for the order                     | `149.99`       |
+| `total_freight`         | number  | Total freight cost for the order                     | `25.50`        |
+| `n_items`               | number  | Number of items in the order                         | `1`            |
+| `n_sellers`             | number  | Number of unique sellers in the order                | `1`            |
+| `avg_price`             | number  | Average item price                                   | `149.99`       |
+| `payment_value`         | number  | Total payment value                                  | `175.49`       |
+| `payment_installments`  | number  | Number of payment installments                       | `3`            |
+| `product_category`      | string  | Product category                                     | `"electronics"`|
+| `seller_state`          | string  | Seller state code                                    | `"SP"`         |
+| `payment_type`          | string  | Payment type                                         | `"credit_card"`|
+
+### 4.2 Validation Rules
+
+- All fields above are **required**.
+- Numeric fields must be **numbers**, not strings.
+- `/predict/batch`:
+  - Accepts a **non-empty list** of records.
+  - Enforces a hard limit of **100 records** per request.
+- When validation fails, the API returns:
+  - HTTP **400** with:
+
+  
+---
+
+## 5. Running the API Without Docker
+
+You can run the Flask app directly (locally or inside Codespaces).
+# From repo root
+python -m pip install -r requirements.txt
+
+### 5.2 Start the API
+
+The API will be available at:
+
+- `http://127.0.0.1:5000/health`
+
+### 5.3 Run Tests
+
+Make sure `BASE_URL` in `test_api.py` is set to `http://127.0.0.1:5000`, then:
+
+You should see all 5 tests run:
+
+1. `GET /health`
+2. Valid `POST /predict`
+3. Valid `POST /predict/batch`
+4. Missing required field
+5. Invalid type for numeric field
+
+---
+
+## 6. Running the API with Docker
+
+### 6.1 Build the Image
+
+From the repo root:
+docker build -t hw4-api .
+---
+# If 5000 is free:
+docker run -p 5000:5000 hw4-api
+
+# Or, if 5000 is in use:
+docker run -p 5001:5000 hw4-api
+---
+https://special-space-cod-q77v556xq45xcrxv-500.app.github.dev/health
+
+--
+# Run tests against the container:
+Update BASE_URL in test_api.py to match the mapped port (5000 or 5001), then:
+python test_api.py
+
+## 7. Training the Model (`train_model.py`)
+
+To regenerate `model.pkl` from the HW3 pipeline:
+
+1. Ensure the Olist CSVs are available under `Data!/`:
+2. Run the training script:
+This script:
+cd /workspaces/Data-hw-4   # or repo root locally
+python train_model.py
+
+- Loads the Olist data.
+- Recreates the HW3 feature engineering.
+- Trains the `RandomForestClassifier` pipeline.
+- Saves the fitted pipeline to **`model.pkl`** in the repo root.
+
+3. After retraining, rebuild Docker so the container picks up the new model:
+docker build -t hw4-api .
+## 8. Notes & Limitations
+
+- The model in this repo may be trained on a **subset** of the original Olist data (for file size / upload limits), so performance metrics differ from full HW2/HW3.
+- Feature engineering and label definitions are reused from HW2/HW3; HW4 focuses on **deployment and monitoring**, not model re-tuning.
+- The API is **not authenticated** and does not implement production-grade rate limiting or monitoring; those aspects are explored conceptually in the HW4 notebooks.
